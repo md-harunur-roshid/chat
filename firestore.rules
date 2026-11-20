@@ -1,0 +1,511 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ------------------------------------------------------------------
+    // Global Hardened Primitives
+    // ------------------------------------------------------------------
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidPair(list) {
+      return list is list
+        && list.size() == 2
+        && isValidId(list[0])
+        && isValidId(list[1])
+        && list[0] < list[1];
+    }
+
+    function isChatParticipant(chatId) {
+      return isVerifiedUser()
+        && isValidId(chatId)
+        && exists(/databases/$(database)/documents/chats/$(chatId))
+        && request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants;
+    }
+
+    // ------------------------------------------------------------------
+    // Entity Validation Helpers (Blueprint Synchronicity)
+    // ------------------------------------------------------------------
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll([
+          'uid', 'displayName', 'photoURL', 'bio',
+          'isOnline', 'isDiscoverable', 'lastSeen', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'displayName', 'photoURL', 'bio',
+          'isOnline', 'isDiscoverable', 'lastSeen', 'createdAt', 'updatedAt'
+        ])
+        && data.uid == userId
+        && data.uid == request.auth.uid
+        && isValidId(data.uid)
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80
+        && data.photoURL is string && data.photoURL.size() <= 500
+        && data.bio is string && data.bio.size() <= 160
+        && data.isOnline is bool
+        && data.isDiscoverable is bool
+        && data.lastSeen is timestamp
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUserPrivateInfo(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'updatedAt'])
+        && data.uid == userId
+        && data.uid == request.auth.uid
+        && isValidId(data.uid)
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 254
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidChatRoom(data, chatId) {
+      return data.keys().hasAll([
+          'chatId', 'participants', 'participantA', 'participantB',
+          'participantAName', 'participantBName', 'participantAPhoto', 'participantBPhoto',
+          'lastMessageText', 'lastMessageSenderId', 'lastMessageAt', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'chatId', 'participants', 'participantA', 'participantB',
+          'participantAName', 'participantBName', 'participantAPhoto', 'participantBPhoto',
+          'lastMessageText', 'lastMessageSenderId', 'lastMessageAt', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(chatId)
+        && data.chatId == chatId
+        && isValidPair(data.participants)
+        && data.participantA == data.participants[0]
+        && data.participantB == data.participants[1]
+        && chatId == data.participantA + '_' + data.participantB
+        && data.participantAName is string && data.participantAName.size() >= 1 && data.participantAName.size() <= 80
+        && data.participantBName is string && data.participantBName.size() >= 1 && data.participantBName.size() <= 80
+        && data.participantAPhoto is string && data.participantAPhoto.size() <= 500
+        && data.participantBPhoto is string && data.participantBPhoto.size() <= 500
+        && data.lastMessageText is string && data.lastMessageText.size() <= 500
+        && data.lastMessageSenderId is string && data.lastMessageSenderId.size() <= 128
+        && data.lastMessageAt is timestamp
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidChatMessage(data, chatId, messageId) {
+      return data.keys().hasAll([
+          'messageId', 'chatId', 'participants', 'senderId',
+          'senderName', 'type', 'text', 'readBy', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'messageId', 'chatId', 'participants', 'senderId',
+          'senderName', 'type', 'text', 'readBy', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(messageId)
+        && data.messageId == messageId
+        && isValidId(chatId)
+        && data.chatId == chatId
+        && isValidPair(data.participants)
+        && isValidId(data.senderId)
+        && data.senderId in data.participants
+        && data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 80
+        && data.type in ['text', 'call_event']
+        && data.text is string && data.text.size() >= 1 && data.text.size() <= 2000
+        && data.readBy is list && data.readBy.size() >= 1 && data.readBy.size() <= 2
+        && isValidId(data.readBy[0])
+        && (data.readBy.size() == 1 || (isValidId(data.readBy[1]) && data.readBy[1] != data.readBy[0]))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTypingState(data, chatId, userId) {
+      return data.keys().hasAll(['userId', 'chatId', 'participants', 'isTyping', 'updatedAt'])
+        && data.keys().hasOnly(['userId', 'chatId', 'participants', 'isTyping', 'updatedAt'])
+        && isValidId(userId)
+        && data.userId == userId
+        && isValidId(chatId)
+        && data.chatId == chatId
+        && isValidPair(data.participants)
+        && data.userId in data.participants
+        && data.isTyping is bool
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCallSession(data, callId) {
+      return data.keys().hasAll([
+          'callId', 'chatId', 'callerId', 'calleeId',
+          'callerName', 'callerPhoto', 'calleeName', 'calleePhoto',
+          'callType', 'status', 'offerType', 'offerSdp',
+          'answerType', 'answerSdp', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'callId', 'chatId', 'callerId', 'calleeId',
+          'callerName', 'callerPhoto', 'calleeName', 'calleePhoto',
+          'callType', 'status', 'offerType', 'offerSdp',
+          'answerType', 'answerSdp', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(callId)
+        && data.callId == callId
+        && isValidId(data.chatId)
+        && isValidId(data.callerId)
+        && isValidId(data.calleeId)
+        && data.callerId != data.calleeId
+        && data.callerName is string && data.callerName.size() >= 1 && data.callerName.size() <= 80
+        && data.callerPhoto is string && data.callerPhoto.size() <= 500
+        && data.calleeName is string && data.calleeName.size() >= 1 && data.calleeName.size() <= 80
+        && data.calleePhoto is string && data.calleePhoto.size() <= 500
+        && data.callType in ['audio', 'video']
+        && data.status in ['ringing', 'active', 'ended', 'declined', 'missed']
+        && data.offerType == 'offer'
+        && data.offerSdp is string && data.offerSdp.size() >= 1 && data.offerSdp.size() <= 32000
+        && data.answerType in ['', 'answer']
+        && data.answerSdp is string && data.answerSdp.size() <= 32000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidIceCandidate(data, callId, candidateId) {
+      return data.keys().hasAll([
+          'candidateId', 'callId', 'participants', 'senderId',
+          'candidate', 'sdpMid', 'sdpMLineIndex', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'candidateId', 'callId', 'participants', 'senderId',
+          'candidate', 'sdpMid', 'sdpMLineIndex', 'createdAt'
+        ])
+        && isValidId(candidateId)
+        && data.candidateId == candidateId
+        && isValidId(callId)
+        && data.callId == callId
+        && isValidPair(data.participants)
+        && isValidId(data.senderId)
+        && data.senderId in data.participants
+        && data.candidate is string && data.candidate.size() >= 1 && data.candidate.size() <= 2000
+        && data.sdpMid is string && data.sdpMid.size() <= 64
+        && data.sdpMLineIndex is int && data.sdpMLineIndex >= 0 && data.sdpMLineIndex <= 20
+        && data.createdAt is timestamp;
+    }
+
+    // ------------------------------------------------------------------
+    // /users/{userId} — Public Directory & Real-Time Presence
+    // ------------------------------------------------------------------
+    match /users/{userId} {
+      allow get: if isVerifiedUser() && isValidId(userId);
+      allow list: if isVerifiedUser() && existing().isDiscoverable == true;
+
+      allow create: if isVerifiedUser()
+        && isValidId(userId)
+        && userId == request.auth.uid
+        && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && incoming().lastSeen == request.time;
+
+      allow update: if isVerifiedUser()
+        && isValidId(userId)
+        && userId == request.auth.uid
+        && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == existing().createdAt
+        && incoming().uid == existing().uid
+        && incoming().updatedAt == request.time
+        && (
+          // Action: Heartbeat / Presence update
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly(['isOnline', 'lastSeen', 'updatedAt'])
+            && incoming().lastSeen == request.time
+          )
+          ||
+          // Action: Profile edit / sync
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'displayName', 'photoURL', 'bio', 'isOnline', 'isDiscoverable', 'lastSeen', 'updatedAt'
+            ])
+            && incoming().lastSeen == request.time
+          )
+        );
+
+      allow delete: if false;
+
+      // Owner-only isolated PII
+      match /private/info {
+        allow get: if isVerifiedUser() && isValidId(userId) && userId == request.auth.uid;
+        allow list: if false;
+        allow create: if isVerifiedUser()
+          && isValidId(userId)
+          && userId == request.auth.uid
+          && isValidUserPrivateInfo(incoming(), userId)
+          && incoming().updatedAt == request.time;
+        allow update: if isVerifiedUser()
+          && isValidId(userId)
+          && userId == request.auth.uid
+          && isValidUserPrivateInfo(incoming(), userId)
+          && incoming().uid == existing().uid
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'updatedAt']);
+        allow delete: if false;
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // /chats/{chatId} — Deterministic 1-to-1 Chat Rooms
+    // ------------------------------------------------------------------
+    match /chats/{chatId} {
+      allow get: if isVerifiedUser()
+        && isValidId(chatId)
+        && request.auth.uid in existing().participants;
+
+      allow list: if isVerifiedUser()
+        && request.auth.uid in existing().participants;
+
+      allow create: if isVerifiedUser()
+        && isValidId(chatId)
+        && isValidChatRoom(incoming(), chatId)
+        && request.auth.uid in incoming().participants
+        && exists(/databases/$(database)/documents/users/$(incoming().participantA))
+        && exists(/databases/$(database)/documents/users/$(incoming().participantB))
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && incoming().lastMessageAt == request.time;
+
+      allow update: if isVerifiedUser()
+        && isValidId(chatId)
+        && isValidChatRoom(incoming(), chatId)
+        && request.auth.uid in existing().participants
+        && incoming().chatId == existing().chatId
+        && incoming().participants == existing().participants
+        && incoming().participantA == existing().participantA
+        && incoming().participantB == existing().participantB
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action: Update last message metadata on message send
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'lastMessageText', 'lastMessageSenderId', 'lastMessageAt', 'updatedAt'
+            ])
+            && incoming().lastMessageSenderId == request.auth.uid
+            && incoming().lastMessageAt == request.time
+          )
+          ||
+          // Action: Refresh participant display info
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'participantAName', 'participantBName', 'participantAPhoto', 'participantBPhoto', 'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if false;
+
+      // ----------------------------------------------------------------
+      // /chats/{chatId}/messages/{messageId}
+      // ----------------------------------------------------------------
+      match /messages/{messageId} {
+        allow get: if isVerifiedUser()
+          && isValidId(chatId)
+          && isValidId(messageId)
+          && request.auth.uid in existing().participants;
+
+        allow list: if isVerifiedUser()
+          && request.auth.uid in existing().participants;
+
+        allow create: if isVerifiedUser()
+          && isValidId(chatId)
+          && isValidId(messageId)
+          && isValidChatMessage(incoming(), chatId, messageId)
+          && incoming().senderId == request.auth.uid
+          && incoming().readBy.size() == 1
+          && incoming().readBy[0] == request.auth.uid
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && isChatParticipant(chatId)
+          && incoming().participants == get(/databases/$(database)/documents/chats/$(chatId)).data.participants;
+
+        allow update: if isVerifiedUser()
+          && isValidId(chatId)
+          && isValidId(messageId)
+          && isValidChatMessage(incoming(), chatId, messageId)
+          && request.auth.uid in existing().participants
+          && incoming().messageId == existing().messageId
+          && incoming().chatId == existing().chatId
+          && incoming().participants == existing().participants
+          && incoming().senderId == existing().senderId
+          && incoming().senderName == existing().senderName
+          && incoming().type == existing().type
+          && incoming().text == existing().text
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            // Action: Mark message as read by recipient
+            incoming().diff(existing()).affectedKeys().hasOnly(['readBy', 'updatedAt'])
+            && existing().readBy.size() == 1
+            && incoming().readBy.size() == 2
+            && incoming().readBy[0] == existing().readBy[0]
+            && incoming().readBy[1] == request.auth.uid
+            && request.auth.uid != existing().senderId
+          );
+
+        allow delete: if false;
+      }
+
+      // ----------------------------------------------------------------
+      // /chats/{chatId}/typing/{userId}
+      // ----------------------------------------------------------------
+      match /typing/{userId} {
+        allow get: if isVerifiedUser()
+          && isValidId(chatId)
+          && isValidId(userId)
+          && request.auth.uid in existing().participants;
+
+        allow list: if isVerifiedUser()
+          && request.auth.uid in existing().participants;
+
+        allow create: if isVerifiedUser()
+          && isValidId(chatId)
+          && isValidId(userId)
+          && userId == request.auth.uid
+          && isValidTypingState(incoming(), chatId, userId)
+          && incoming().updatedAt == request.time
+          && isChatParticipant(chatId)
+          && incoming().participants == get(/databases/$(database)/documents/chats/$(chatId)).data.participants;
+
+        allow update: if isVerifiedUser()
+          && isValidId(chatId)
+          && isValidId(userId)
+          && userId == request.auth.uid
+          && isValidTypingState(incoming(), chatId, userId)
+          && incoming().userId == existing().userId
+          && incoming().chatId == existing().chatId
+          && incoming().participants == existing().participants
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['isTyping', 'updatedAt']);
+
+        allow delete: if false;
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // /calls/{callId} — WebRTC Audio/Video Call Signaling
+    // ------------------------------------------------------------------
+    match /calls/{callId} {
+      allow get: if isVerifiedUser()
+        && isValidId(callId)
+        && (existing().callerId == request.auth.uid || existing().calleeId == request.auth.uid);
+
+      allow list: if isVerifiedUser()
+        && (existing().callerId == request.auth.uid || existing().calleeId == request.auth.uid);
+
+      allow create: if isVerifiedUser()
+        && isValidId(callId)
+        && isValidCallSession(incoming(), callId)
+        && incoming().callerId == request.auth.uid
+        && incoming().status == 'ringing'
+        && incoming().answerType == ''
+        && incoming().answerSdp == ''
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && isChatParticipant(incoming().chatId)
+        && incoming().calleeId in get(/databases/$(database)/documents/chats/$(incoming().chatId)).data.participants;
+
+      allow update: if isVerifiedUser()
+        && isValidId(callId)
+        && isValidCallSession(incoming(), callId)
+        && (existing().callerId == request.auth.uid || existing().calleeId == request.auth.uid)
+        // Terminal State Locking: ended, declined, missed calls are immutable
+        && existing().status in ['ringing', 'active']
+        // Immutable identity & offer fields
+        && incoming().callId == existing().callId
+        && incoming().chatId == existing().chatId
+        && incoming().callerId == existing().callerId
+        && incoming().calleeId == existing().calleeId
+        && incoming().callerName == existing().callerName
+        && incoming().callerPhoto == existing().callerPhoto
+        && incoming().calleeName == existing().calleeName
+        && incoming().calleePhoto == existing().calleePhoto
+        && incoming().callType == existing().callType
+        && incoming().offerType == existing().offerType
+        && incoming().offerSdp == existing().offerSdp
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action: Callee accepts ringing call with WebRTC answer
+          (
+            request.auth.uid == existing().calleeId
+            && existing().status == 'ringing'
+            && incoming().status == 'active'
+            && incoming().answerType == 'answer'
+            && incoming().answerSdp.size() > 0
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'status', 'answerType', 'answerSdp', 'updatedAt'
+            ])
+          )
+          ||
+          // Action: Callee declines ringing call
+          (
+            request.auth.uid == existing().calleeId
+            && existing().status == 'ringing'
+            && incoming().status == 'declined'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+          )
+          ||
+          // Action: Either peer ends an active call, or caller cancels/misses a ringing call
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+            && (
+              (existing().status == 'active' && incoming().status == 'ended')
+              || (existing().status == 'ringing' && request.auth.uid == existing().callerId && incoming().status == 'missed')
+            )
+          )
+        );
+
+      allow delete: if false;
+
+      // ----------------------------------------------------------------
+      // /calls/{callId}/candidates/{candidateId}
+      // ----------------------------------------------------------------
+      match /candidates/{candidateId} {
+        allow get: if isVerifiedUser()
+          && isValidId(callId)
+          && isValidId(candidateId)
+          && request.auth.uid in existing().participants;
+
+        allow list: if isVerifiedUser()
+          && request.auth.uid in existing().participants;
+
+        allow create: if isVerifiedUser()
+          && isValidId(callId)
+          && isValidId(candidateId)
+          && isValidIceCandidate(incoming(), callId, candidateId)
+          && incoming().senderId == request.auth.uid
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/calls/$(callId))
+          && (
+            request.auth.uid == get(/databases/$(database)/documents/calls/$(callId)).data.callerId
+            || request.auth.uid == get(/databases/$(database)/documents/calls/$(callId)).data.calleeId
+          )
+          && get(/databases/$(database)/documents/calls/$(callId)).data.callerId in incoming().participants
+          && get(/databases/$(database)/documents/calls/$(callId)).data.calleeId in incoming().participants
+          && get(/databases/$(database)/documents/calls/$(callId)).data.status in ['ringing', 'active'];
+
+        allow update, delete: if false;
+      }
+    }
+  }
+}

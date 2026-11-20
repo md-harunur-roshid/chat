@@ -1,0 +1,6 @@
+{
+  "name": "Alap — Real-Time Chat & Calls",
+  "description": "Real-time messaging, live presence, typing indicators, and WebRTC audio/video calling powered by Firestore.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

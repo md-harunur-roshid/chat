@@ -18,7 +18,15 @@ import {
   syncUserProfileOnLogin,
   updateUserPresence,
 } from './lib/chatService';
-import { auth, db, handleFirestoreError } from './lib/firebase';
+import {
+  BLUEPRINT_LIMITS,
+  auth,
+  db,
+  getDeterministicChatId,
+  getSortedPair,
+  handleFirestoreError,
+  sanitizeString,
+} from './lib/firebase';
 import { Locale } from './lib/i18n';
 import {
   CallType,
@@ -38,6 +46,8 @@ function ChatAppContent() {
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [chats, setChats] = useState<ChatRoom[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
+  const [pendingChat, setPendingChat] = useState<ChatRoom | null>(null);
+  const [chatError, setChatError] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [otherTypingState, setOtherTypingState] = useState<TypingState | null>(null);
 
@@ -225,10 +235,13 @@ function ChatAppContent() {
     return map;
   }, [users, currentUser]);
 
-  const activeChat = useMemo(
-    () => chats.find((c) => c.chatId === activeChatId) ?? null,
-    [chats, activeChatId]
-  );
+  const activeChat = useMemo(() => {
+    if (!activeChatId) return null;
+    return (
+      chats.find((c) => c.chatId === activeChatId) ??
+      (pendingChat?.chatId === activeChatId ? pendingChat : null)
+    );
+  }, [chats, activeChatId, pendingChat]);
 
   const activeOtherUser = useMemo(() => {
     if (!activeChat || !currentUser) return null;
@@ -260,8 +273,39 @@ function ChatAppContent() {
   const handleStartChatWithUser = useCallback(
     async (other: UserProfile) => {
       if (!currentUser) return;
-      const chatId = await ensureChatRoom(currentUser, other);
+      setChatError(null);
+      const chatId = getDeterministicChatId(currentUser.uid, other.uid);
+      const [participantA, participantB] = getSortedPair(currentUser.uid, other.uid);
+      const isCurrentA = currentUser.uid === participantA;
+      const userA = isCurrentA ? currentUser : other;
+      const userB = isCurrentA ? other : currentUser;
+
+      const optimisticRoom: ChatRoom = {
+        chatId,
+        participants: [participantA, participantB],
+        participantA,
+        participantB,
+        participantAName: sanitizeString(userA.displayName, BLUEPRINT_LIMITS.DISPLAY_NAME_MAX, 'User'),
+        participantBName: sanitizeString(userB.displayName, BLUEPRINT_LIMITS.DISPLAY_NAME_MAX, 'User'),
+        participantAPhoto: sanitizeString(userA.photoURL, BLUEPRINT_LIMITS.PHOTO_URL_MAX, ''),
+        participantBPhoto: sanitizeString(userB.photoURL, BLUEPRINT_LIMITS.PHOTO_URL_MAX, ''),
+        lastMessageText: '',
+        lastMessageSenderId: '',
+        lastMessageAt: null,
+        createdAt: null,
+        updatedAt: null,
+      };
+
+      setPendingChat(optimisticRoom);
       setActiveChatId(chatId);
+
+      try {
+        const synced = await ensureChatRoom(currentUser, other);
+        setPendingChat(synced);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setChatError(msg);
+      }
     },
     [currentUser]
   );
@@ -341,7 +385,19 @@ function ChatAppContent() {
       </div>
 
       {/* Chat Viewport: hidden on mobile when no chat is selected */}
-      <div className={`${activeChatId ? 'flex' : 'hidden md:flex'} flex-1 h-full min-w-0`}>
+      <div className={`${activeChatId ? 'flex' : 'hidden md:flex'} flex-1 h-full min-w-0 relative`}>
+        {chatError && (
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-40 max-w-md w-[90%] bg-red-600 text-white text-xs px-4 py-2.5 rounded-xl shadow-lg flex items-center justify-between gap-3">
+            <span className="truncate">{chatError}</span>
+            <button
+              type="button"
+              onClick={() => setChatError(null)}
+              className="underline shrink-0 cursor-pointer"
+            >
+              OK
+            </button>
+          </div>
+        )}
         <ChatWindow
           chat={activeChat}
           currentUser={currentUser}

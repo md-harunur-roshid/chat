@@ -19,6 +19,7 @@ import {
 import {
   CallStatus,
   CallType,
+  ChatRoom,
   MessageType,
   OperationType,
   UserProfile,
@@ -150,7 +151,7 @@ export async function updateUserProfileDetails(
 export async function ensureChatRoom(
   currentUser: UserProfile,
   otherUser: UserProfile
-): Promise<string> {
+): Promise<ChatRoom> {
   const chatId = getDeterministicChatId(currentUser.uid, otherUser.uid);
   const path = `chats/${chatId}`;
   const chatRef = doc(db, 'chats', chatId);
@@ -158,6 +159,11 @@ export async function ensureChatRoom(
   const isCurrentA = currentUser.uid === participantA;
   const userA = isCurrentA ? currentUser : otherUser;
   const userB = isCurrentA ? otherUser : currentUser;
+
+  const nextAName = sanitizeString(userA.displayName, BLUEPRINT_LIMITS.DISPLAY_NAME_MAX, 'User');
+  const nextBName = sanitizeString(userB.displayName, BLUEPRINT_LIMITS.DISPLAY_NAME_MAX, 'User');
+  const nextAPhoto = sanitizeString(userA.photoURL, BLUEPRINT_LIMITS.PHOTO_URL_MAX, '');
+  const nextBPhoto = sanitizeString(userB.photoURL, BLUEPRINT_LIMITS.PHOTO_URL_MAX, '');
 
   try {
     const snap = await getDoc(chatRef);
@@ -167,38 +173,49 @@ export async function ensureChatRoom(
         participants: [participantA, participantB],
         participantA,
         participantB,
-        participantAName: sanitizeString(userA.displayName, BLUEPRINT_LIMITS.DISPLAY_NAME_MAX, 'User'),
-        participantBName: sanitizeString(userB.displayName, BLUEPRINT_LIMITS.DISPLAY_NAME_MAX, 'User'),
-        participantAPhoto: sanitizeString(userA.photoURL, BLUEPRINT_LIMITS.PHOTO_URL_MAX, ''),
-        participantBPhoto: sanitizeString(userB.photoURL, BLUEPRINT_LIMITS.PHOTO_URL_MAX, ''),
+        participantAName: nextAName,
+        participantBName: nextBName,
+        participantAPhoto: nextAPhoto,
+        participantBPhoto: nextBPhoto,
         lastMessageText: '',
         lastMessageSenderId: '',
         lastMessageAt: serverTimestamp(),
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
-    } else {
-      const existing = snap.data();
-      const nextAName = sanitizeString(userA.displayName, BLUEPRINT_LIMITS.DISPLAY_NAME_MAX, 'User');
-      const nextBName = sanitizeString(userB.displayName, BLUEPRINT_LIMITS.DISPLAY_NAME_MAX, 'User');
-      const nextAPhoto = sanitizeString(userA.photoURL, BLUEPRINT_LIMITS.PHOTO_URL_MAX, '');
-      const nextBPhoto = sanitizeString(userB.photoURL, BLUEPRINT_LIMITS.PHOTO_URL_MAX, '');
-      if (
-        existing.participantAName !== nextAName ||
-        existing.participantBName !== nextBName ||
-        existing.participantAPhoto !== nextAPhoto ||
-        existing.participantBPhoto !== nextBPhoto
-      ) {
-        await updateDoc(chatRef, {
-          participantAName: nextAName,
-          participantBName: nextBName,
-          participantAPhoto: nextAPhoto,
-          participantBPhoto: nextBPhoto,
-          updatedAt: serverTimestamp(),
-        });
-      }
+      return {
+        chatId,
+        participants: [participantA, participantB],
+        participantA,
+        participantB,
+        participantAName: nextAName,
+        participantBName: nextBName,
+        participantAPhoto: nextAPhoto,
+        participantBPhoto: nextBPhoto,
+        lastMessageText: '',
+        lastMessageSenderId: '',
+        lastMessageAt: null,
+        createdAt: null,
+        updatedAt: null,
+      };
     }
-    return chatId;
+
+    const existing = snap.data() as ChatRoom;
+    if (
+      existing.participantAName !== nextAName ||
+      existing.participantBName !== nextBName ||
+      existing.participantAPhoto !== nextAPhoto ||
+      existing.participantBPhoto !== nextBPhoto
+    ) {
+      await updateDoc(chatRef, {
+        participantAName: nextAName,
+        participantBName: nextBName,
+        participantAPhoto: nextAPhoto,
+        participantBPhoto: nextBPhoto,
+        updatedAt: serverTimestamp(),
+      });
+    }
+    return existing;
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
   }
@@ -273,23 +290,17 @@ export async function setTypingStatus(
   const path = `chats/${chatId}/typing/${userId}`;
   const typingRef = doc(db, 'chats', chatId, 'typing', userId);
   try {
-    const snap = await getDoc(typingRef);
-    if (!snap.exists()) {
-      await setDoc(typingRef, {
-        userId,
-        chatId,
-        participants,
-        isTyping,
-        updatedAt: serverTimestamp(),
-      });
-    } else {
-      await updateDoc(typingRef, {
-        isTyping,
-        updatedAt: serverTimestamp(),
-      });
-    }
+    await setDoc(typingRef, {
+      userId,
+      chatId,
+      participants,
+      isTyping,
+      updatedAt: serverTimestamp(),
+    });
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
+    if (error instanceof Error && error.message.toLowerCase().includes('permission')) {
+      handleFirestoreError(error, OperationType.WRITE, path);
+    }
   }
 }
 

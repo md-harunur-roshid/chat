@@ -24,18 +24,51 @@ import {
   UserProfile,
 } from '../types/chat';
 
+let pendingSignupDisplayName: string | null = null;
+
+export function setPendingSignupDisplayName(name: string | null): void {
+  pendingSignupDisplayName = name ? sanitizeString(name, BLUEPRINT_LIMITS.DISPLAY_NAME_MAX) : null;
+}
+
+export function resolveIdentifierToAuthEmail(rawIdentifier: string): {
+  authEmail: string;
+  isPhone: boolean;
+} | null {
+  const trimmed = rawIdentifier.trim();
+  if (!trimmed) return null;
+
+  // Email format
+  if (trimmed.includes('@')) {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(trimmed) || trimmed.length > 254) return null;
+    return { authEmail: trimmed.toLowerCase(), isPhone: false };
+  }
+
+  // Phone number format: strip spaces, dashes, parentheses; keep digits (optionally leading +)
+  const digitsOnly = trimmed.replace(/[^\d]/g, '');
+  if (digitsOnly.length < 6 || digitsOnly.length > 15) return null;
+  return { authEmail: `p_${digitsOnly}@phone.alap.app`, isPhone: true };
+}
+
 export async function syncUserProfileOnLogin(user: User): Promise<void> {
   const userPath = `users/${user.uid}`;
   const privatePath = `users/${user.uid}/private/info`;
   const userRef = doc(db, 'users', user.uid);
   const privateRef = doc(db, 'users', user.uid, 'private', 'info');
 
+  const resolvedName = sanitizeString(
+    user.displayName || pendingSignupDisplayName,
+    BLUEPRINT_LIMITS.DISPLAY_NAME_MAX,
+    'User'
+  );
+  pendingSignupDisplayName = null;
+
   try {
     const snap = await getDoc(userRef);
     if (!snap.exists()) {
       await setDoc(userRef, {
         uid: user.uid,
-        displayName: sanitizeString(user.displayName, BLUEPRINT_LIMITS.DISPLAY_NAME_MAX, 'User'),
+        displayName: resolvedName,
         photoURL: sanitizeString(user.photoURL, BLUEPRINT_LIMITS.PHOTO_URL_MAX, ''),
         bio: '',
         isOnline: true,

@@ -10,9 +10,15 @@ import { AuthScreen } from './components/AuthScreen';
 import { CallOverlay } from './components/CallOverlay';
 import { ChatWindow } from './components/ChatWindow';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { MediaPermissionBanner } from './components/MediaPermissionBanner';
 import { ProfileModal } from './components/ProfileModal';
 import { Sidebar } from './components/Sidebar';
 import { useWebRTCCall } from './hooks/useWebRTCCall';
+import {
+  checkMediaPermissions,
+  type MediaPermissionState,
+  requestMediaAccess,
+} from './lib/mediaPermissions';
 import {
   ensureChatRoom,
   syncUserProfileOnLogin,
@@ -53,6 +59,14 @@ function ChatAppContent() {
 
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
+
+  const [mediaPerms, setMediaPerms] = useState<MediaPermissionState>({
+    mic: 'granted',
+    camera: 'granted',
+  });
+  const [requestingPerms, setRequestingPerms] = useState(false);
+  const [wasPermDenied, setWasPermDenied] = useState(false);
+  const [permDismissed, setPermDismissed] = useState(false);
 
   const [locale, setLocale] = useState<Locale>(() => {
     const saved = typeof window !== 'undefined' ? window.localStorage.getItem('alap_locale') : null;
@@ -336,6 +350,52 @@ function ChatAppContent() {
     dismissError,
   } = useWebRTCCall(currentUser, locale);
 
+  const refreshMediaPermissions = useCallback(async () => {
+    const state = await checkMediaPermissions();
+    setMediaPerms(state);
+    return state;
+  }, []);
+
+  const handleRequestMediaPermission = useCallback(async () => {
+    setRequestingPerms(true);
+    try {
+      const res = await requestMediaAccess({ audio: true, video: true });
+      setWasPermDenied(!res.ok && res.errorKind === 'denied');
+      await refreshMediaPermissions();
+    } finally {
+      setRequestingPerms(false);
+    }
+  }, [refreshMediaPermissions]);
+
+  // Proactively check and ask for camera/mic permission when signed in if not yet granted
+  useEffect(() => {
+    if (!currentUser) return;
+    let cancelled = false;
+    const initCheck = async () => {
+      const state = await checkMediaPermissions();
+      if (cancelled) return;
+      setMediaPerms(state);
+      if (state.mic === 'prompt' || state.camera === 'prompt') {
+        const res = await requestMediaAccess({ audio: true, video: true });
+        if (cancelled) return;
+        setWasPermDenied(!res.ok && res.errorKind === 'denied');
+        const nextState = await checkMediaPermissions();
+        if (!cancelled) setMediaPerms(nextState);
+      }
+    };
+    void initCheck();
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser?.uid]);
+
+  useEffect(() => {
+    if (callError) {
+      setPermDismissed(false);
+      void refreshMediaPermissions();
+    }
+  }, [callError, refreshMediaPermissions]);
+
   const handleStartCall = useCallback(
     (callee: UserProfile, chatId: string, callType: CallType) => {
       void startCall(callee, chatId, callType);
@@ -362,43 +422,60 @@ function ChatAppContent() {
     );
   }
 
-  return (
-    <div className="h-screen w-full overflow-hidden bg-slate-50 dark:bg-slate-950 flex">
-      {/* Sidebar: hidden on mobile when a chat is active */}
-      <div className={`${activeChatId ? 'hidden md:flex' : 'flex'} w-full md:w-auto h-full`}>
-        <Sidebar
-          currentUser={currentUser}
-          chats={chats}
-          users={users}
-          usersMap={usersMap}
-          activeChatId={activeChatId}
-          nowMs={nowMs}
-          locale={locale}
-          isDark={isDark}
-          onSelectChat={(chatId) => setActiveChatId(chatId)}
-          onStartChatWithUser={(u) => void handleStartChatWithUser(u)}
-          onOpenProfile={() => setShowProfileModal(true)}
-          onToggleLocale={() => setLocale((l) => (l === 'bn' ? 'en' : 'bn'))}
-          onToggleDark={() => setIsDark((d) => !d)}
-          onSignOut={() => void handleSignOut()}
-        />
-      </div>
+  const needsMediaPermission =
+    !permDismissed && (mediaPerms.mic !== 'granted' || mediaPerms.camera !== 'granted');
 
-      {/* Chat Viewport: hidden on mobile when no chat is selected */}
-      <div className={`${activeChatId ? 'flex' : 'hidden md:flex'} flex-1 h-full min-w-0 relative`}>
-        {chatError && (
-          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-40 max-w-md w-[90%] bg-red-600 text-white text-xs px-4 py-2.5 rounded-xl shadow-lg flex items-center justify-between gap-3">
-            <span className="truncate">{chatError}</span>
-            <button
-              type="button"
-              onClick={() => setChatError(null)}
-              className="underline shrink-0 cursor-pointer"
-            >
-              OK
-            </button>
-          </div>
-        )}
-        <ChatWindow
+  return (
+    <div className="h-screen w-full overflow-hidden bg-slate-50 dark:bg-slate-950 flex flex-col">
+      {needsMediaPermission && (
+        <div className="shrink-0">
+          <MediaPermissionBanner
+            permissions={mediaPerms}
+            requesting={requestingPerms}
+            wasDeniedOnTry={wasPermDenied}
+            locale={locale}
+            onRequestPermission={() => void handleRequestMediaPermission()}
+            onDismiss={() => setPermDismissed(true)}
+          />
+        </div>
+      )}
+
+      <div className="flex-1 min-h-0 flex">
+        {/* Sidebar: hidden on mobile when a chat is active */}
+        <div className={`${activeChatId ? 'hidden md:flex' : 'flex'} w-full md:w-auto h-full`}>
+          <Sidebar
+            currentUser={currentUser}
+            chats={chats}
+            users={users}
+            usersMap={usersMap}
+            activeChatId={activeChatId}
+            nowMs={nowMs}
+            locale={locale}
+            isDark={isDark}
+            onSelectChat={(chatId) => setActiveChatId(chatId)}
+            onStartChatWithUser={(u) => void handleStartChatWithUser(u)}
+            onOpenProfile={() => setShowProfileModal(true)}
+            onToggleLocale={() => setLocale((l) => (l === 'bn' ? 'en' : 'bn'))}
+            onToggleDark={() => setIsDark((d) => !d)}
+            onSignOut={() => void handleSignOut()}
+          />
+        </div>
+
+        {/* Chat Viewport: hidden on mobile when no chat is selected */}
+        <div className={`${activeChatId ? 'flex' : 'hidden md:flex'} flex-1 h-full min-w-0 relative`}>
+          {chatError && (
+            <div className="absolute top-3 left-1/2 -translate-x-1/2 z-40 max-w-md w-[90%] bg-red-600 text-white text-xs px-4 py-2.5 rounded-xl shadow-lg flex items-center justify-between gap-3">
+              <span className="truncate">{chatError}</span>
+              <button
+                type="button"
+                onClick={() => setChatError(null)}
+                className="underline shrink-0 cursor-pointer"
+              >
+                OK
+              </button>
+            </div>
+          )}
+          <ChatWindow
           chat={activeChat}
           currentUser={currentUser}
           otherUser={activeOtherUser}
@@ -409,6 +486,7 @@ function ChatAppContent() {
           onBackMobile={() => setActiveChatId(null)}
           onStartCall={handleStartCall}
         />
+        </div>
       </div>
 
       {showProfileModal && (
